@@ -78,41 +78,44 @@ Fintech environments demand absolute safety compliance. QueueStorm Investigator 
 ### Sample Request
 
 POST /api/analyze-ticket
-
+```
 {
-"ticket_id": "TKT-015",
-"complaint": "I tried to recharge my phone and it failed but you stole my 10 taka! Refund me right now or I am calling my lawyer!",
-"language": "en",
-"channel": "in_app_chat",
-"user_type": "customer",
-"transaction_history": [
-{
-"transaction_id": "TXN-015",
-"timestamp": "2026-04-14T10:00:00Z",
-"type": "payment",
-"amount": 10,
-"counterparty": "MOBILE-OP",
-"status": "failed"
+  "ticket_id": "TKT-015",
+  "complaint": "I tried to recharge my phone and it failed but you stole my 10 taka! Refund me right now or I am calling my lawyer!",
+  "language": "en",
+  "channel": "in_app_chat",
+  "user_type": "customer",
+  "transaction_history": [
+    {
+      "transaction_id": "TXN-015",
+      "timestamp": "2026-04-14T10:00:00Z",
+      "type": "payment",
+      "amount": 10,
+      "counterparty": "MOBILE-OP",
+      "status": "failed"
+    }
+  ]
 }
-]
-}
-
+```
 ### Sample Response (HTTP 200)
-
+```
 {
-"ticket_id": "TKT-015",
-"relevant_transaction_id": "TXN-015",
-"evidence_verdict": "consistent",
-"case_type": "payment_failed",
-"severity": "high",
-"department": "payments_ops",
-"agent_summary": "Customer is highly agitated and threatening legal action over a failed 10 BDT mobile recharge.",
-"recommended_next_action": "Verify if the 10 BDT was actually deducted despite the 'failed' status and initiate auto-reversal if true.",
-"customer_reply": "We apologize for the inconvenience with your mobile recharge. We see the transaction failed and are checking your balance. Any eligible amount will be processed through official channels upon review.",
-"human_review_required": true,
-"confidence": 0.95,
-"reason_codes": ["failed_status_matching", "agitated_tone"]
+  "ticket_id": "TKT-015",
+  "relevant_transaction_id": "TXN-015",
+  "evidence_verdict": "consistent",
+  "case_type": "payment_failed",
+  "severity": "high",
+  "department": "payments_ops",
+  "agent_summary": "Customer is highly agitated and threatening legal action over a failed 10 BDT mobile recharge.",
+  "recommended_next_action": "Verify if the 10 BDT was actually deducted despite the 'failed' status and initiate auto-reversal if true.",
+  "customer_reply": "We apologize for the inconvenience with your mobile recharge. We see the transaction failed and are checking your balance. Any eligible amount will be processed through official channels upon review.",
+  "human_review_required": true,
+  "confidence": 0.95,
+  "reason_codes": [
+    "failed_status_matching",
+    "agitated_tone"
+  ]
 }
-
+```
 ---
 
