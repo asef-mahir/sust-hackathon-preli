@@ -77,7 +77,7 @@ export async function POST(req) {
     // 4. Validate Output Schema (Prevents Enum hallucinations)
     const validatedOutput = OutputSchema.safeParse(rawAiOutputJson);
     if (!validatedOutput.success) {
-      console.error("🔥 LLM SCHEMA HALLUCINATION:", validatedOutput.error.format());
+      console.error("LLM SCHEMA HALLUCINATION:", validatedOutput.error.format());
       return NextResponse.json(getFallbackPayload(payload.ticket_id, "schema_hallucination"), { status: 200 });
     }
 
@@ -89,11 +89,11 @@ export async function POST(req) {
   } catch (error) {
     // Catch timeouts and API crashes gracefully
     if (error.name === 'AbortError' || error.message === 'GATEWAY_TIMEOUT') {
-      console.error("🔥 GEMINI TIMEOUT CAUGHT");
+      console.error("GEMINI TIMEOUT CAUGHT");
       return NextResponse.json(getFallbackPayload(payload.ticket_id, "timeout_exceeded"), { status: 200 });
     }
 
-    console.error("🔥 GEMINI EXECUTION ERROR:", error.message);
+    console.error("GEMINI EXECUTION ERROR:", error.message);
     const backupJson = getFallbackPayload(payload.ticket_id, error.message);
     return NextResponse.json(backupJson, { status: 200 });
   }
