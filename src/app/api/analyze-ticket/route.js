@@ -3,108 +3,33 @@
 // Rules-only evidence engine. No LLM dependency. Safe by construction.
 
 import { NextResponse } from 'next/server';
-import { z } from 'zod';
+import { RequestSchema, OutputSchema } from '@/lib/schemas'; 
+import { SYSTEM_INSTRUCTION, generateUserPrompt } from '@/lib/prompts';
+import { applySafetyFilters } from '@/lib/safetyFilters';
+import { GoogleGenAI } from '@google/genai';
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+// Initialize the client (automatically uses process.env.GEMINI_API_KEY)
+const ai = new GoogleGenAI({});
 
-// ---------------------------------------------------------------------------
-// Enums (must match the QueueStorm schema exactly)
-// ---------------------------------------------------------------------------
-const CASE_TYPES = [
-  'wrong_transfer',
-  'payment_failed',
-  'refund_request',
-  'duplicate_payment',
-  'merchant_settlement_delay',
-  'agent_cash_in_issue',
-  'phishing_or_social_engineering',
-  'other',
-];
+// Deterministic fallback for timeouts, crashes, and API failures
+const getFallbackPayload = (ticketId, diagnosticMessage) => ({
+  ticket_id: ticketId || "UNKNOWN-TICKET",
+  relevant_transaction_id: null,
+  evidence_verdict: "insufficient_data",
+  case_type: "other",
+  severity: "high",
+  department: "customer_support",
+  agent_summary: "Automated analysis degraded due to backend processing timeout or structural constraint.",
+  recommended_next_action: "Perform an immediate manual check on the customer profile and transaction logs.",
+  customer_reply: "We are currently experiencing high volume processing delays. Your issue has been safely placed in our queue for manual review.",
+  human_review_required: true,
+  confidence: 0.0,
+  reason_codes: ["circuit_breaker_timeout", diagnosticMessage || "unknown_error"]
+});
 
-const DEPARTMENTS = [
-  'customer_support',
-  'dispute_resolution',
-  'payments_ops',
-  'merchant_operations',
-  'agent_operations',
-  'fraud_risk',
-];
-
-const SEVERITIES = ['low', 'medium', 'high', 'critical'];
-const VERDICTS = ['consistent', 'inconsistent', 'insufficient_data'];
-const TX_TYPES = ['transfer', 'payment', 'cash_in', 'cash_out', 'settlement', 'refund'];
-const TX_STATUS = ['completed', 'failed', 'pending', 'reversed'];
-const LANGUAGES = ['en', 'bn', 'mixed'];
-const CHANNELS = ['in_app_chat', 'call_center', 'email', 'merchant_portal', 'field_agent'];
-const USER_TYPES = ['customer', 'merchant', 'agent', 'unknown'];
-
-// ---------------------------------------------------------------------------
-// Safety regexes â€” fail closed if any of these appear in customer_reply or
-// recommended_next_action
-// ---------------------------------------------------------------------------
-const UNSAFE_CREDENTIALS =
-  /\b(provide|share|enter|give|send|tell me|what is|kindly share|please share)\s+(your\s+)?(pin|otp|password|cvv|secret|credential|one[- ]time\s+password)\b/i;
-
-const UNSAFE_PROMISES =
-  /\b(will refund|refunded|reversed your|money back|guarantee reversal|refund processed|unblock your|will return your|we have refunded|will credit your)\b/i;
-
-const UNSAFE_THIRD_PARTY =
-  /\b(call\s+\d{6,}|contact\s+\d{6,}|email\s+[a-z0-9._-]+@[a-z0-9.-]+|reach us at)\b/i;
-
-// Prompt-injection patterns stripped from the complaint BEFORE classification
-const INJECTION_PATTERNS = [
-  /ignore (all|any|previous|prior|the|your) (rules|instructions|prompts?)/gi,
-  /disregard (all|any|previous|prior|the|your) (rules|instructions|prompts?)/gi,
-  /forget (all|any|previous|prior|the|your) (rules|instructions|prompts?)/gi,
-  /system\s*:\s*[^\n]+/gi,
-  /you are now [^\n]+/gi,
-  /reveal (your|the) system prompt/gi,
-  /override (all|any|the) (rules|safety)/gi,
-  /\bset\s+evidence_verdict\s*=\s*\w+/gi,
-  /\bset\s+case_type\s*=\s*\w+/gi,
-  /\bpromise (a )?refund\b/gi,
-  /\bi (will|refund|reverse) (you|your|the)/gi,
-];
-
-// ---------------------------------------------------------------------------
-// Zod schemas
-// ---------------------------------------------------------------------------
-const TransactionSchema = z
-  .object({
-    transaction_id: z.string().min(1),
-    timestamp: z.string().min(1),
-    type: z.enum(TX_TYPES),
-    amount: z.number().nonnegative(),
-    counterparty: z.string().min(1),
-    status: z.enum(TX_STATUS),
-  })
-  .passthrough();
-
-const InputSchema = z
-  .object({
-    ticket_id: z.string().min(1),
-    complaint: z.string().min(1),
-    language: z.enum(LANGUAGES).optional(),
-    channel: z.enum(CHANNELS).optional(),
-    user_type: z.enum(USER_TYPES).optional(),
-    campaign_context: z.any().optional(),
-    transaction_history: z.array(TransactionSchema).optional().default([]),
-    metadata: z.record(z.any()).optional(),
-  })
-  .passthrough();
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-const digitsOnly = (s) => (s || '').replace(/\D/g, '');
-const lastNDigits = (s, n = 8) => digitsOnly(s).slice(-n);
-
-function normalizeComplaint(raw) {
-  if (!raw) return '';
-  let text = String(raw);
-  for (const pat of INJECTION_PATTERNS) text = text.replace(pat, ' ');
-  return text.replace(/\s+/g, ' ').trim();
+// Sanitizer for LLM markdown hallucinations
+function cleanJsonString(str) {
+  return str.replace(/```json/gi, '').replace(/```/g, '').trim();
 }
 
 function extractMentionedNumbers(text) {
@@ -535,11 +460,70 @@ export async function POST(req) {
   let rawBody;
   try {
     rawBody = await req.json();
-  } catch {
-    return NextResponse.json(
-      { error: 'Malformed payload structure: invalid JSON.' },
-      { status: 400 },
-    );
+  } catch (err) {
+    return NextResponse.json({ error: "Malformed payload structure" }, { status: 400 });
+  }
+
+  // 1. Validate Input Schema (Fail fast on bad payloads)
+  const parsingResult = RequestSchema.safeParse(rawBody);
+  if (!parsingResult.success) {
+    return NextResponse.json({ error: parsingResult.error.format() }, { status: 400 });
+  }
+
+  const payload = parsingResult.data;
+  if (!payload.complaint || payload.complaint.trim() === "") {
+    return NextResponse.json({ error: "Semantic error: Complaint text field is missing values" }, { status: 422 });
+  }
+
+  // 2. Setup Native AbortController & Promise Race (25s hard kill)
+  const controller = new AbortController();
+  
+  try {
+    const aiPromise = ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: generateUserPrompt(payload),
+      config: {
+        systemInstruction: SYSTEM_INSTRUCTION,
+        responseMimeType: 'application/json'
+      },
+      signal: controller.signal // Attempt native abort
+    });
+
+    const timeoutPromise = new Promise((_, reject) => {
+      setTimeout(() => {
+        controller.abort(); // Fire the abort signal
+        reject(new Error("GATEWAY_TIMEOUT"));
+      }, 25000);
+    });
+
+    // 3. Execute the race condition
+    const response = await Promise.race([aiPromise, timeoutPromise]);
+
+    const cleanedOutput = cleanJsonString(response.text);
+    let rawAiOutputJson = JSON.parse(cleanedOutput);
+
+    // 4. Validate Output Schema (Prevents Enum hallucinations)
+    const validatedOutput = OutputSchema.safeParse(rawAiOutputJson);
+    if (!validatedOutput.success) {
+      console.error("LLM SCHEMA HALLUCINATION:", validatedOutput.error.format());
+      return NextResponse.json(getFallbackPayload(payload.ticket_id, "schema_hallucination"), { status: 200 });
+    }
+
+    // 5. Apply safety filters (Overrides unauthorized promises deterministically)
+    const finalJsonResult = applySafetyFilters(validatedOutput.data, payload.ticket_id);
+    
+    return NextResponse.json(finalJsonResult, { status: 200 });
+
+  } catch (error) {
+    // Catch timeouts and API crashes gracefully
+    if (error.name === 'AbortError' || error.message === 'GATEWAY_TIMEOUT') {
+      console.error("GEMINI TIMEOUT CAUGHT");
+      return NextResponse.json(getFallbackPayload(payload.ticket_id, "timeout_exceeded"), { status: 200 });
+    }
+
+    console.error("GEMINI EXECUTION ERROR:", error.message);
+    const backupJson = getFallbackPayload(payload.ticket_id, error.message);
+    return NextResponse.json(backupJson, { status: 200 });
   }
 
   const parsed = InputSchema.safeParse(rawBody);
